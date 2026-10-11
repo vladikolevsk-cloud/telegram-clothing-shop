@@ -8,12 +8,23 @@ from aiogram.types import CallbackQuery, Message
 
 from config import Config
 from database import Database
-from database.orders import OutOfStockError
-from keyboards.callbacks import OrderAction, OrderCB, PickCB, PickKind
+from database.orders import ORDER_STATUS_LABELS, OutOfStockError
+from keyboards.callbacks import (
+    MyOrdersAction,
+    MyOrdersCB,
+    OrderAction,
+    OrderCB,
+    PickCB,
+    PickKind,
+)
 from keyboards.admin import create_waybill_kb
 from keyboards.user import (
+    back_to_menu_kb,
     city_options_kb,
+    can_cancel_order,
+    confirm_order_cancel_kb,
     main_menu_kb,
+    my_orders_kb,
     order_cancel_kb,
     product_sizes_kb,
     warehouse_options_kb,
@@ -26,9 +37,134 @@ from utils.validators import normalize_phone, squash_spaces
 
 logger = logging.getLogger(__name__)
 router = Router(name="order")
+MY_ORDERS_PAGE_SIZE = 5
 
 NP_UNAVAILABLE = "Сервис Новой почты сейчас недоступен. Попробуйте ещё раз через минуту."
 CITY_PROMPT = "Введите название города (или населённого пункта):"
+
+
+async def _show_my_orders(
+    cb: CallbackQuery, db: Database, user_id: int, page: int
+) -> None:
+    total = await db.orders.count_for_user(user_id)
+    if total == 0:
+        await send_fresh(
+            cb,
+            "У вас пока нет оформленных заказов.",
+            back_to_menu_kb(),
+        )
+        return
+
+    last_page = (total - 1) // MY_ORDERS_PAGE_SIZE
+    page = max(0, min(page, last_page))
+    orders = await db.orders.get_page_for_user(
+        user_id, page * MY_ORDERS_PAGE_SIZE, MY_ORDERS_PAGE_SIZE
+    )
+
+    lines = ["📦 <b>Ваши заказы</b>\n"]
+    for order in orders:
+        order_id = int(order["id"])
+        product = escape(str(order["product_name"]))
+        size = escape(str(order["size"] or "не указан"))
+        status = ORDER_STATUS_LABELS.get(str(order["status"]), "Статус неизвестен")
+        if order["np_ttn_creating"] == 2:
+            status += " · Создание накладной требует проверки, свяжитесь с администратором"
+        elif order["np_ttn_creating"] == 1:
+            status += " · Накладная создаётся"
+        lines.append(
+            f"Заказ <b>#{order_id}</b> — {product}, размер {size}, "
+            f"{fmt_price(float(order['price']))}\n"
+            f"Статус: {status}"
+        )
+        if order["np_ttn_number"]:
+            lines[-1] += f"\nТТН: <code>{escape(str(order['np_ttn_number']))}</code>"
+        if can_cancel_order(order):
+            lines[-1] += "\nМожно отменить кнопкой ниже."
+
+    await send_fresh(
+        cb,
+        "\n\n".join(lines),
+        my_orders_kb(orders, page, last_page),
+    )
+
+
+@router.callback_query(MyOrdersCB.filter(F.action == MyOrdersAction.SHOW))
+async def show_my_orders(
+    cb: CallbackQuery, callback_data: MyOrdersCB, db: Database
+) -> None:
+    await _show_my_orders(cb, db, cb.from_user.id, callback_data.page)
+    await cb.answer()
+
+
+@router.callback_query(MyOrdersCB.filter(F.action == MyOrdersAction.ASK_CANCEL))
+async def ask_cancel_order(
+    cb: CallbackQuery, callback_data: MyOrdersCB, db: Database
+) -> None:
+    order = await db.orders.get_for_user(callback_data.order_id, cb.from_user.id)
+    if order is None:
+        await cb.answer("Заказ не найден", show_alert=True)
+        return
+    if not can_cancel_order(order):
+        await cb.answer(
+            "Этот заказ уже нельзя отменить здесь. Свяжитесь с администратором.",
+            show_alert=True,
+        )
+        return
+    await send_fresh(
+        cb,
+        f"Отменить заказ #{callback_data.order_id}? "
+        "Выбранный размер вернётся в остаток.",
+        confirm_order_cancel_kb(callback_data.order_id, callback_data.page),
+    )
+    await cb.answer()
+
+
+@router.callback_query(
+    MyOrdersCB.filter(F.action == MyOrdersAction.CONFIRM_CANCEL)
+)
+async def confirm_cancel_order(
+    cb: CallbackQuery,
+    callback_data: MyOrdersCB,
+    db: Database,
+    config: Config,
+    bot: Bot,
+) -> None:
+    result = await db.orders.cancel_for_user(
+        callback_data.order_id, cb.from_user.id
+    )
+    if result == "not_found":
+        await cb.answer("Заказ не найден", show_alert=True)
+        return
+    if result == "not_cancellable":
+        await cb.answer(
+            "Заказ уже нельзя отменить в боте. Обсудите отмену с администратором.",
+            show_alert=True,
+        )
+        return
+
+    cancelled_order = await db.orders.get_for_user(
+        callback_data.order_id, cb.from_user.id
+    )
+    if cancelled_order is not None:
+        cancellation_notice = (
+            f"❌ <b>Покупатель отменил заказ #{callback_data.order_id}</b>\n"
+            f"Товар: {escape(str(cancelled_order['product_name']))}\n"
+            f"Размер: {escape(str(cancelled_order['size']))}\n"
+            f"Telegram ID: <code>{cb.from_user.id}</code>"
+        )
+        for admin_id in config.admin_ids:
+            try:
+                await bot.send_message(admin_id, cancellation_notice)
+            except TelegramAPIError as exc:
+                logger.warning(
+                    "Не удалось уведомить администратора %s об отмене заказа #%s: %s",
+                    admin_id,
+                    callback_data.order_id,
+                    exc,
+                )
+
+    await cb.answer("Заказ отменён, остаток восстановлен")
+    await _show_my_orders(cb, db, cb.from_user.id, callback_data.page)
 
 
 @router.callback_query(OrderCB.filter(F.action == OrderAction.START))

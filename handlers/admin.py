@@ -1,13 +1,15 @@
 import logging
 from html import escape
 
-from aiogram import F, Router
+from aiogram import Bot, F, Router
+from aiogram.exceptions import TelegramAPIError
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message
 
 from categories import CATEGORY_LABELS
 from database import Database
+from database.orders import ORDER_STATUS_LABELS
 from filters import IsAdmin
 from keyboards.admin import (
     admin_menu_kb,
@@ -26,6 +28,7 @@ from keyboards.callbacks import (
     AddProductCategoryCB,
     AdminAction,
     AdminCB,
+    AdminOrderStatusCB,
     NPSetupCB,
     NPSetupStep,
 )
@@ -625,6 +628,54 @@ async def np_setup_pick_warehouse(
 
 
 
+@router.callback_query(AdminOrderStatusCB.filter())
+async def update_order_status(
+    cb: CallbackQuery,
+    callback_data: AdminOrderStatusCB,
+    db: Database,
+    bot: Bot,
+) -> None:
+    result, user_id = await db.orders.advance_status(
+        callback_data.order_id, callback_data.status
+    )
+    if result == "not_found":
+        await cb.answer("Заказ не найден", show_alert=True)
+        return
+    if result == "invalid" or user_id is None:
+        await cb.answer(
+            "Этот статус сейчас нельзя установить. Проверьте заказ и наличие накладной.",
+            show_alert=True,
+        )
+        return
+
+    label = ORDER_STATUS_LABELS[callback_data.status]
+    try:
+        await bot.send_message(
+            user_id,
+            f"📦 Статус вашего заказа #{callback_data.order_id} обновлён: "
+            f"<b>{label}</b>.",
+        )
+    except TelegramAPIError as exc:
+        logger.warning(
+            "Не удалось уведомить покупателя %s об изменении статуса заказа #%s: %s",
+            user_id,
+            callback_data.order_id,
+            exc,
+        )
+
+    order = await db.orders.get_for_admin(callback_data.order_id)
+    message = cb.message
+    if order is not None and isinstance(message, Message):
+        await message.edit_reply_markup(
+            reply_markup=create_waybill_kb(
+                callback_data.order_id,
+                status=str(order["status"]),
+                has_waybill=bool(order["np_ttn_number"]),
+            )
+        )
+    await cb.answer(f"Статус изменён: {label}")
+
+
 @router.callback_query(AdminCB.filter(F.action == AdminAction.CREATE_WAYBILL))
 async def create_waybill(
     cb: CallbackQuery,
@@ -650,6 +701,9 @@ async def create_waybill(
     order = await db.orders.reserve_waybill(callback_data.order_id)
     if order is None:
         await cb.answer("Заказ не найден", show_alert=True)
+        return
+    if order.get("status") == "cancelled":
+        await cb.answer("Покупатель отменил этот заказ", show_alert=True)
         return
     if order.get("np_ttn_number"):
         await cb.answer(
@@ -708,7 +762,15 @@ async def create_waybill(
     await db.orders.complete_waybill(callback_data.order_id, waybill.ref, waybill.number)
     message = cb.message
     if isinstance(message, Message):
-        await message.edit_reply_markup(reply_markup=None)
+        order = await db.orders.get_for_admin(callback_data.order_id)
+        if order is not None:
+            await message.edit_reply_markup(
+                reply_markup=create_waybill_kb(
+                    callback_data.order_id,
+                    status=str(order["status"]),
+                    has_waybill=True,
+                )
+            )
         await message.answer(
             f"✅ Накладная для заказа #{callback_data.order_id} создана.\n"
             f"ТТН: <code>{escape(waybill.number)}</code>"
@@ -730,8 +792,13 @@ async def reset_unknown_waybill(
     message = cb.message
     if isinstance(message, Message):
         await message.edit_reply_markup(reply_markup=None)
+        order = await db.orders.get_for_admin(callback_data.order_id)
         await message.answer(
             "Проверка завершена. Можно повторить создание накладной:",
-            reply_markup=create_waybill_kb(callback_data.order_id),
+            reply_markup=create_waybill_kb(
+                callback_data.order_id,
+                status=str(order["status"]) if order else "new",
+                has_waybill=bool(order and order["np_ttn_number"]),
+            ),
         )
     await cb.answer("Повторная попытка разрешена")

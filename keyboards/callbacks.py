@@ -35,6 +35,18 @@ class OrderCB(CallbackData, prefix="order"):
     product_id: int = 0
 
 
+class MyOrdersAction(str, Enum):
+    SHOW = "show"
+    ASK_CANCEL = "ask"
+    CONFIRM_CANCEL = "cancel"
+
+
+class MyOrdersCB(CallbackData, prefix="myord"):
+    action: MyOrdersAction
+    page: int = 0
+    order_id: int = 0
+
+
 class AdminAction(str, Enum):
     MENU = "menu"
     ADD = "add"
@@ -54,6 +66,11 @@ class AdminCB(CallbackData, prefix="adm"):
     page: int = 0
     product_id: int = 0
     order_id: int = 0
+
+
+class AdminOrderStatusCB(CallbackData, prefix="admst"):
+    order_id: int
+    status: str
 
 
 class NPSetupStep(str, Enum):

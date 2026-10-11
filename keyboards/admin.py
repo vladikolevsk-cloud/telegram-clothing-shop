@@ -9,6 +9,7 @@ from .callbacks import (
     AddProductCategoryCB,
     AdminAction,
     AdminCB,
+    AdminOrderStatusCB,
     NPSetupCB,
     NPSetupStep,
     Nav,
@@ -150,12 +151,29 @@ def np_setup_options_kb(
     return kb.as_markup()
 
 
-def create_waybill_kb(order_id: int) -> InlineKeyboardMarkup:
+def create_waybill_kb(
+    order_id: int,
+    status: str = "new",
+    has_waybill: bool = False,
+) -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
-    kb.button(
-        text="📦 Создать накладную",
-        callback_data=AdminCB(action=AdminAction.CREATE_WAYBILL, order_id=order_id),
-    )
+    if not has_waybill and status != "cancelled":
+        kb.button(
+            text="📦 Создать накладную",
+            callback_data=AdminCB(action=AdminAction.CREATE_WAYBILL, order_id=order_id),
+        )
+    next_status = {
+        "new": ("confirmed", "✅ Подтвердить"),
+        "confirmed": ("preparing", "📦 Начать сборку"),
+        "preparing": ("shipped", "🚚 Отметить отправленным"),
+    }.get(status)
+    if next_status and (next_status[0] != "shipped" or has_waybill):
+        target_status, button_text = next_status
+        kb.button(
+            text=button_text,
+            callback_data=AdminOrderStatusCB(order_id=order_id, status=target_status),
+        )
+    kb.adjust(1)
     return kb.as_markup()
 
 

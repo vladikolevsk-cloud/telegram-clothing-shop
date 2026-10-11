@@ -9,6 +9,8 @@ from .callbacks import (
     AdminCB,
     CategoryCatalogCB,
     CatalogCB,
+    MyOrdersAction,
+    MyOrdersCB,
     Nav,
     NavCB,
     OrderAction,
@@ -21,8 +23,82 @@ from .callbacks import (
 def main_menu_kb(is_admin: bool) -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
     kb.button(text="🛍 Каталог", callback_data=CatalogCB(offset=0))
+    kb.button(
+        text="📦 Мои заказы",
+        callback_data=MyOrdersCB(action=MyOrdersAction.SHOW),
+    )
     if is_admin:
         kb.button(text="⚙️ Админ-панель", callback_data=AdminCB(action=AdminAction.MENU))
+    kb.adjust(1)
+    return kb.as_markup()
+
+
+def my_orders_kb(
+    orders: list[dict[str, object]], page: int, last_page: int
+) -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    for order in orders:
+        order_id = int(order["id"])
+        if can_cancel_order(order):
+            kb.button(
+                text=f"❌ Отменить заказ #{order_id}",
+                callback_data=MyOrdersCB(
+                    action=MyOrdersAction.ASK_CANCEL,
+                    page=page,
+                    order_id=order_id,
+                ),
+            )
+    kb.adjust(1)
+
+    navigation: list[InlineKeyboardButton] = []
+    if page > 0:
+        navigation.append(
+            InlineKeyboardButton(
+                text="⬅️",
+                callback_data=MyOrdersCB(
+                    action=MyOrdersAction.SHOW, page=page - 1
+                ).pack(),
+            )
+        )
+    if page < last_page:
+        navigation.append(
+            InlineKeyboardButton(
+                text="➡️",
+                callback_data=MyOrdersCB(
+                    action=MyOrdersAction.SHOW, page=page + 1
+                ).pack(),
+            )
+        )
+    if navigation:
+        kb.row(*navigation)
+    kb.button(text="🏠 В меню", callback_data=NavCB(target=Nav.MAIN))
+    return kb.as_markup()
+
+
+def can_cancel_order(order: dict[str, object]) -> bool:
+    return (
+        order["status"] in ("new", "confirmed", "preparing")
+        and order["product_id"] is not None
+        and bool(order["size"])
+        and order["np_ttn_number"] is None
+        and order["np_ttn_creating"] == 0
+    )
+
+
+def confirm_order_cancel_kb(order_id: int, page: int) -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    kb.button(
+        text="✅ Да, отменить",
+        callback_data=MyOrdersCB(
+            action=MyOrdersAction.CONFIRM_CANCEL,
+            page=page,
+            order_id=order_id,
+        ),
+    )
+    kb.button(
+        text="↩️ Назад",
+        callback_data=MyOrdersCB(action=MyOrdersAction.SHOW, page=page),
+    )
     kb.adjust(1)
     return kb.as_markup()
 
